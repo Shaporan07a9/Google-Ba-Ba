@@ -4,7 +4,8 @@ name: Build Google Ba Ba APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - 'GoogleBaBa-GitHub-Ready.zip'
       - '.github/workflows/build-from-zip.yml'
@@ -14,17 +15,43 @@ permissions:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify ZIP file
+        run: |
+          if [ ! -f GoogleBaBa-GitHub-Ready.zip ]; then
+            echo "ERROR: Project ZIP file not found!"
+            exit 1
+          fi
+          ls -lh GoogleBaBa-GitHub-Ready.zip
+
       - name: Extract Android project
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip
-          unzip -o GoogleBaBa-GitHub-Ready.zip -d .
+          mkdir -p android-project
+          unzip -o GoogleBaBa-GitHub-Ready.zip -d android-project
+          echo "Extracted project files:"
+          ls -la android-project
+
+      - name: Locate Android project
+        run: |
+          if [ -f android-project/settings.gradle ] || [ -f android-project/settings.gradle.kts ]; then
+            echo "PROJECT_DIR=android-project" >> "$GITHUB_ENV"
+          else
+            PROJECT_FILE=$(find android-project -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)
+            if [ -z "$PROJECT_FILE" ]; then
+              echo "ERROR: settings.gradle not found!"
+              exit 1
+            fi
+            PROJECT_DIR=$(dirname "$PROJECT_FILE")
+            echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          fi
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -33,23 +60,30 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
       - name: Install Android SDK packages
         run: |
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          yes | sdkmanager --licenses || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.4'
 
-      - name: Build APK
-        run: gradle --no-daemon assembleDebug
+      - name: Build Debug APK
+        run: |
+          cd "$GITHUB_WORKSPACE/$PROJECT_DIR"
+          gradle --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: GoogleBaBa-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            android-project/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
