@@ -4,7 +4,8 @@ name: Build Google Ba Ba APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - 'GoogleBaBa-GitHub-Ready.zip'
       - '.github/workflows/build-from-zip.yml'
@@ -18,37 +19,57 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Install unzip
       - name: Install unzip
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip
 
+      # 3. Verify ZIP
       - name: Verify ZIP
         run: |
+          set -e
           test -f GoogleBaBa-GitHub-Ready.zip
           unzip -t GoogleBaBa-GitHub-Ready.zip
 
+      # 4. Extract Android project
       - name: Extract Android project
         run: |
+          set -e
+          mkdir -p extracted
           unzip -o GoogleBaBa-GitHub-Ready.zip -d extracted
 
+      # 5. Locate Android project
       - name: Locate Android project
+        shell: bash
         run: |
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
-            -name settings.gradle -o -name settings.gradle.kts \
-            | head -n 1 | xargs dirname)
+          set -e
 
-          if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "Android project not found!"
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -print -quit)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Android settings.gradle not found!"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PROJECT_DIR")
+
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "Android app directory not found!"
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found project: $PROJECT_DIR"
 
+          echo "Android project found: $PROJECT_DIR"
+
+      # 6. Enable AndroidX
       - name: Enable AndroidX
         run: |
           cd "$PROJECT_DIR"
@@ -61,31 +82,103 @@ jobs:
           grep -qxF 'android.enableJetifier=true' gradle.properties || \
             echo 'android.enableJetifier=true' >> gradle.properties
 
+          echo "AndroidX configuration:"
           cat gradle.properties
 
+      # 7. Validate XML resources
+      - name: Validate XML resources
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = os.environ["PROJECT_DIR"]
+          resource_dir = os.path.join(
+              root, "app", "src", "main", "res"
+          )
+
+          errors = []
+
+          if not os.path.isdir(resource_dir):
+              print("No Android resource directory found.")
+              raise SystemExit(0)
+
+          for current, _, files in os.walk(resource_dir):
+              for filename in files:
+                  if not filename.endswith(".xml"):
+                      continue
+
+                  path = os.path.join(current, filename)
+
+                  try:
+                      ET.parse(path)
+                  except ET.ParseError as error:
+                      errors.append((path, error))
+
+          if errors:
+              print("\nXML VALIDATION FAILED:\n")
+
+              for path, error in errors:
+                  print(f"File: {path}")
+                  print(f"Error: {error}\n")
+
+              raise SystemExit(1)
+
+          print("All Android XML resource files are valid.")
+          PY
+
+      # 8. Setup Java
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
+      # 9. Setup Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
+      # 10. Install Android SDK packages
       - name: Install Android SDK packages
         run: |
-          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
 
+      # 11. Setup Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.4'
 
+      # 12. Build Debug APK
       - name: Build Debug APK
         run: |
           cd "$PROJECT_DIR"
+
           gradle --no-daemon assembleDebug --stacktrace
 
+      # 13. Verify APK
+      - name: Verify APK
+        run: |
+          set -e
+
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/debug"
+
+          if ! find "$APK_DIR" -maxdepth 1 -name '*.apk' \
+            -type f | grep -q .; then
+            echo "APK file was not generated!"
+            exit 1
+          fi
+
+          echo "APK generated successfully:"
+          ls -lh "$APK_DIR"/*.apk
+
+      # 14. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
